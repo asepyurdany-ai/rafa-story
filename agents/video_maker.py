@@ -33,43 +33,30 @@ WATERMARK = "@fakhry831"
 
 # Typewriter settings
 TYPEWRITER_FPS = 15           # fps for typewriter frame sequence
-TYPEWRITER_TYPING_RATIO = 0.65  # typing completes at this fraction of video
+TYPEWRITER_TYPING_RATIO = 0.25  # typing completes at this fraction of video (faster!)
 
+
+_last_background = None  # Track last used to avoid repeats
 
 def get_background_video(content_type: str) -> str:
-    """Pick appropriate background video based on content type.
-    Prefers real Pixabay downloads; falls back to gradient placeholders.
-    """
-    real_mapping = {
-        "quotes": ["mosque.mp4", "stars_night.mp4"],
-        "hadist": ["mosque.mp4", "desert_sunset.mp4"],
-        "kisah": ["desert_sunset.mp4", "stars_night.mp4", "mosque.mp4"],
-    }
-    fallback_mapping = {
-        "quotes": ["mosque_gradient.mp4", "stars_gradient.mp4"],
-        "hadist": ["mosque_gradient.mp4", "desert_gradient.mp4"],
-        "kisah": ["desert_gradient.mp4", "stars_gradient.mp4", "mosque_gradient.mp4"],
-    }
+    """Pick background video — avoids repeating the same one consecutively."""
+    global _last_background
 
-    for name in real_mapping.get(content_type, ["mosque.mp4"]):
-        path = os.path.join(BACKGROUNDS_DIR, name)
-        if os.path.exists(path):
-            print(f"[VideoMaker] Using real background: {name}")
-            return path
+    all_backgrounds = sorted(Path(BACKGROUNDS_DIR).glob("bg_*.mp4"))
+    if not all_backgrounds:
+        raise FileNotFoundError("No background videos found in assets/backgrounds/")
 
-    for name in fallback_mapping.get(content_type, ["mosque_gradient.mp4"]):
-        path = os.path.join(BACKGROUNDS_DIR, name)
-        if os.path.exists(path):
-            print(f"[VideoMaker] Using gradient fallback: {name}")
-            return path
+    # Convert to strings
+    candidates = [str(p) for p in all_backgrounds]
 
-    backgrounds = list(Path(BACKGROUNDS_DIR).glob("*.mp4"))
-    if backgrounds:
-        chosen = str(random.choice(backgrounds))
-        print(f"[VideoMaker] Using random background: {os.path.basename(chosen)}")
-        return chosen
+    # Exclude last used if we have enough options
+    if _last_background and len(candidates) > 1:
+        candidates = [c for c in candidates if c != _last_background]
 
-    raise FileNotFoundError("No background videos found in assets/backgrounds/")
+    chosen = random.choice(candidates)
+    _last_background = chosen
+    print(f"[VideoMaker] Background: {os.path.basename(chosen)}")
+    return chosen
 
 
 def get_music_file() -> str | None:
@@ -324,50 +311,25 @@ def make_video_typewriter(content: dict, bg_video: str, music_file: str | None, 
         frames_dir = os.path.join(tmp_dir, "frames")
         concat_path = generate_typewriter_frames(content, frames_dir, DURATION)
 
-        # Step 1: render image sequence → silent overlay video (RGBA overlay frames on bg)
-        # We'll use two-pass approach:
-        # Pass 1: concat frames → raw overlay video (with alpha)
-        # Pass 2: composite overlay on bg + add music
-
-        overlay_video = os.path.join(tmp_dir, "overlay.mp4")
-
-        print("[VideoMaker] Building typewriter frame sequence...")
-        cmd_frames = [
-            FFMPEG, "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", concat_path,
-            "-vf", f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black@0",
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "20",
-            "-pix_fmt", "yuva420p",
-            "-t", str(DURATION),
-            overlay_video
-        ]
-        result = subprocess.run(cmd_frames, capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"[VideoMaker] Frame sequence stderr:\n{result.stderr[-2000:]}")
-            raise RuntimeError(f"ffmpeg frame sequence failed: {result.returncode}")
-
-        print("[VideoMaker] Compositing typewriter overlay on background...")
+        # Single-pass: bg video + RGBA image sequence overlay + music
+        # Avoid 2-pass alpha encoding issue (h264 drops alpha → black bg)
+        print("[VideoMaker] Building typewriter video (single-pass)...")
 
         filter_complex = (
             "[0:v]loop=loop=-1:size=1500:start=0,"
             "scale=1080:1920:force_original_aspect_ratio=increase,"
-            "crop=1080:1920,"
-            "setsar=1,"
-            "eq=brightness=-0.15:saturation=0.7"
-            "[bg];"
-            "[1:v]scale=1080:1920[overlay];"
-            "[bg][overlay]overlay=0:0[out]"
+            "crop=1080:1920,setsar=1,"
+            "eq=brightness=-0.1:saturation=0.8[bg];"
+            "[1:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
+            "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1[overlay];"
+            "[bg][overlay]overlay=0:0:format=auto[out]"
         )
 
         cmd = [
             FFMPEG, "-y",
             "-stream_loop", "-1",
             "-i", bg_video,
-            "-i", overlay_video,
+            "-f", "concat", "-safe", "0", "-i", concat_path,
         ]
 
         if music_file:
@@ -375,39 +337,33 @@ def make_video_typewriter(content: dict, bg_video: str, music_file: str | None, 
             filter_complex += ";[2:a]volume=0.6[aout]"
             cmd += [
                 "-filter_complex", filter_complex,
-                "-map", "[out]",
-                "-map", "[aout]",
-                "-t", str(DURATION),
-                "-r", str(FPS),
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "23",
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-movflags", "+faststart",
-                output_path
+                "-map", "[out]", "-map", "[aout]",
             ]
         else:
+            cmd += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
+            filter_complex += ";[2:a]anull[aout]"
             cmd += [
-                "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                 "-filter_complex", filter_complex,
-                "-map", "[out]",
-                "-map", "2:a",
-                "-t", str(DURATION),
-                "-r", str(FPS),
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "23",
-                "-c:a", "aac",
-                "-b:a", "64k",
-                "-movflags", "+faststart",
-                output_path
+                "-map", "[out]", "-map", "[aout]",
             ]
+
+        cmd += [
+            "-t", str(DURATION),
+            "-r", str(FPS),
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            output_path
+        ]
 
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            print(f"[VideoMaker] ffmpeg composite stderr:\n{result.stderr[-2000:]}")
-            raise RuntimeError(f"ffmpeg composite failed: {result.returncode}")
+            print(f"[VideoMaker] ffmpeg stderr:\n{result.stderr[-3000:]}")
+            raise RuntimeError(f"ffmpeg typewriter failed: {result.returncode}")
 
         print(f"[VideoMaker] ✅ Typewriter video generated!")
         size_mb = os.path.getsize(output_path) / (1024 * 1024)
@@ -425,10 +381,10 @@ def make_video(content: dict, output_path: str) -> str:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     bg_video = get_background_video(content_type)
-    music_file = get_music_file()
+    music_file = None  # No music — Asep picks manually on TikTok
 
     print(f"[VideoMaker] Background: {bg_video}")
-    print(f"[VideoMaker] Music: {music_file or 'None (silent)'}")
+    print(f"[VideoMaker] Music: disabled (manual on TikTok)")
 
     # Route quotes and hadist to typewriter effect
     if content_type in ("quotes", "hadist"):

@@ -21,6 +21,31 @@ sys.path.insert(0, os.path.join(BASE_DIR, "agents"))
 from content_generator import get_random_content, load_quotes, load_hadist, load_kisah
 from video_maker import make_video
 
+
+def generate_caption(content: dict) -> str:
+    """Generate FYP-optimized TikTok caption for a content item."""
+    ctype = content.get("type", "quotes")
+    text = content.get("text", "")[:80]
+    source = content.get("source", "")
+    title = content.get("title", "")
+
+    hashtags = {
+        "quotes": "#katahikmah #sahabatnabi #islamicquotes #motivasiislam #hikmahislam #quotes #fyp #fypシ #islam #inspirasi",
+        "hadist": "#hadist #haditshari #islamicreminder #sunnah #nabimuhamad #hikmah #fyp #fypシ #islam #dakwah",
+        "kisah": "#kisahislam #kisahnabi #sejarahislam #teladannabi #islam #fyp #fypシ #dakwah #hikmah #inspirasi",
+    }
+
+    if ctype == "quotes":
+        caption = f'"{text}"\n— {source}\n\n💡 Hikmah yang perlu kita renungkan bersama.\n\n{hashtags["quotes"]}'
+    elif ctype == "hadist":
+        caption = f'📖 {source}\n\n"{text}"\n\n🤲 Semoga bermanfaat dan menjadi pengingat untuk kita semua.\n\n{hashtags["hadist"]}'
+    elif ctype == "kisah":
+        caption = f'🕌 {title}\n\n{text[:100]}...\n\n✨ Kisah yang penuh hikmah dan teladan.\n\n{hashtags["kisah"]}'
+    else:
+        caption = f'{text}\n\n{hashtags.get(ctype, "#islam #fyp")}'
+
+    return caption
+
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
 
@@ -50,10 +75,14 @@ def cmd_generate(args):
     # Generate video
     make_video(content, output_path)
 
+    # Generate caption
+    caption = generate_caption(content)
+
     print(f"\n✅ Done!")
     print(f"📁 Output: {output_path}")
-    print(f"📱 Ready to upload to TikTok @fakhry831")
-    return output_path
+    print(f"\n📝 Caption TikTok:\n{caption}")
+    print(f"\n📱 Ready to upload to TikTok @fakhry831")
+    return output_path, caption
 
 
 def cmd_list(args):
